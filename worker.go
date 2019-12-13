@@ -1,7 +1,6 @@
 package gopool
 
 import (
-	"fmt"
 	"log"
 	"runtime"
 	"sync/atomic"
@@ -16,6 +15,19 @@ import (
 
 const dumpSize = 64 << 10
 
+
+func newWorker(p *Pool, num int) []*worker {
+	work := make([]*worker, num)
+	for i := 0; i < num; i++ {
+		work[i] = &worker{
+			p:        p,
+			state:    0,
+			terminal: make(chan struct{}, 1),
+		}
+	}
+	return work
+}
+
 type worker struct {
 	p        *Pool
 	terminal chan struct{} //销毁用于动态扩容
@@ -28,73 +40,86 @@ type worker struct {
 	state uint8 //标记当前这个worker的状态
 }
 
+//var empty jobUnit
+
 //执行队列任务
-func (w *worker) run() {
+func (w *worker) process() {
 	go func() {
-		for {
-			select {
-			//	单个context
-			//case <-ctx.Done():
-			//	fmt.Println("end plan")
-			//	//if _, err := w.p.write.Write([]byte(ctx.Err().Error())); err != nil {
-			//	//	panic(err)
-			//	//}
-			case <-w.terminal:
-				fmt.Println("receive terminal destroy......")
-				atomic.AddUint32(&destroy, 1)
-				//销毁自身 不知道是否也会销毁pool的对应？？ 或者在发送通知的地方进行销毁
-				//w=nil //调用自身为nil 貌似不行
-				return
-			case <-w.p.ctx.Done():
-				fmt.Println("Worker中全局context", w.p.ctx.Err())
+		defer func() {
+			atomic.AddInt32(&w.p.active, -1)
+			if x := recover(); x != nil {
+				buf := make([]byte, dumpSize)
+				buf = buf[:runtime.Stack(buf, false)]
+				log.Printf("pool:the task in the pool failed: %v\n%s", x, buf)
+				//忽略错误则把错误写入到日志中
 				if w.p.skipErr {
-					if _, err := w.p.log.Write([]byte(w.p.ctx.Err().Error())); err != nil {
+					if _, err := w.p.log.Write(buf); err != nil {
 						panic(err)
 					}
+				} else {
+					//当大量goroutine都发生了recover后很多占用这个方法
+					//任务不在继续执行杀掉所有正在执行的任务 错误是否返回？还是直接panic
+					w.p.once.Do(w.p.Close)
 				}
-				w.p.once.Do(w.p.Close)
+			}
+		}()
+
+		for task := range w.p.queue {
+			//if task == nil {
+			//	return
+			//}
+
+			atomic.AddInt32(&w.p.active, 1)
+			//task.job(task.ctx)
+
+			task()
+			//cache.Put(task)
+			atomic.AddInt32(&w.p.active, -1)
+			//w.recover(task.job)(task.ctx)
+
+			if len(w.terminal)>0{
 				return
-			case task, ok := <-w.p.queue:
-				if !ok {
-					log.Println("worker.queue is close")
-					return
-				}
-				w.recover(task)
 			}
 		}
 	}()
 }
 
-func (w *worker) recover(task Task) {
-	defer func() {
-		if x := recover(); x != nil {
-			buf := make([]byte, dumpSize)
-			buf = buf[:runtime.Stack(buf, false)]
-			log.Printf("pool:the task in the pool failed: %v\n%s", x, buf)
-			//忽略错误则把错误写入到日志中
-			if w.p.skipErr {
-				if _, err := w.p.log.Write(buf); err != nil {
-					panic(err)
-				}
-			} else {
-				//任务不在继续执行杀掉所有正在执行的任务 错误是否返回？还是直接panic
-				w.p.once.Do(w.p.Close)
-			}
-		}
-	}()
-
-	if err := task.Run(); err != nil {
-		//忽略错误则把错误写入到日志中
-		if w.p.skipErr {
-			if _, err := w.p.log.Write([]byte(err.Error())); err != nil {
-				panic(err)
-			}
-		} else {
-			//任务不在继续执行杀掉所有正在执行的任务 错误是否返回？还是直接panic
-			w.p.once.Do(w.p.Close)
-		}
-	}
-}
+//func (w *worker) recover(j Job) func(ctx context.Context) {
+//	return func(ctx context.Context) {
+//		atomic.AddInt32(&w.p.active, 1)
+//		defer func() {
+//			atomic.AddInt32(&w.p.active, -1)
+//			if x := recover(); x != nil {
+//				buf := make([]byte, dumpSize)
+//				buf = buf[:runtime.Stack(buf, false)]
+//				log.Printf("pool:the task in the pool failed: %v\n%s", x, buf)
+//				//忽略错误则把错误写入到日志中
+//				if w.p.skipErr {
+//					if _, err := w.p.log.Write(buf); err != nil {
+//						panic(err)
+//					}
+//				} else {
+//					//当大量goroutine都发生了recover后很多占用这个方法
+//					//任务不在继续执行杀掉所有正在执行的任务 错误是否返回？还是直接panic
+//					w.p.once.Do(w.p.Close)
+//				}
+//			}
+//		}()
+//		j(ctx)
+//
+//		//if err := task.Run(c); err != nil {
+//		//	//忽略错误则把错误写入到日志中
+//		//	if w.p.skipErr {
+//		//		if _, err := w.p.log.Write([]byte(err.Error())); err != nil {
+//		//			panic(err)
+//		//		}
+//		//	} else {
+//		//		//任务不在继续执行杀掉所有正在执行的任务 错误是否返回？还是直接panic
+//		//		w.p.once.Do(w.p.Close)
+//		//	}
+//		//}
+//	}
+//}
 
 func (w *worker) close() {
 	close(w.terminal)

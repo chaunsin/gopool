@@ -1,145 +1,152 @@
 package gopool_test
 
 import (
+	"context"
 	"fmt"
-	"log"
-	"math/rand"
-	"sync"
+	"math"
 	"testing"
 	"time"
+
+	"github.com/chaunsin/gopool"
 )
 
-func TestOne(t *testing.T) {
-	//ctx, cancel := context.WithTimeout(context.Background(), time.Minute*3)
-	//defer cancel()
-
-	pool := NewContextPool(nil, Queue(1000), Worker(6))
-	defer pool.Close()
-
-	for i := 0; i < 1000; i++ {
-		ii := i
-		//减少
-		if i == 100 {
-			pool.Resize(-4)
-		}
-		//增加
-		if i == 150 {
-			pool.Resize(8)
-		}
-
-		//关闭
-		if i == 250 {
-			pool.Close()
-		}
-
-		//关闭后重置数量
-		if i == 260 {
-			//关闭之后重新设置resize
-			pool.Resize(66)
-		}
-
-		if i == 261 {
-			//关闭之后添加
-			pool.SyncAdd(func() error {
-				time.Sleep(time.Millisecond * time.Duration(rand.Int31n(1000)))
-				fmt.Println("第", ii)
-				return nil
-			})
-			continue
-		}
-		if i == 263 {
-			//关闭之后添加
-			pool.Add(func() error {
-				time.Sleep(time.Millisecond * time.Duration(rand.Int31n(1000)))
-				fmt.Println("第", ii)
-				return nil
-			})
-			continue
-		}
-
-		pool.Add(func() error {
-			time.Sleep(time.Millisecond * time.Duration(rand.Int31n(1000)))
-			fmt.Println("第", ii)
-			return nil
-		})
-	}
+func sleep() {
+	time.Sleep(time.Millisecond * 500)
 }
 
-func TestTwo(t *testing.T) {
-	pool := NewContextPool(nil, Queue(100), Worker(4))
-	for i := 0; i < 20; i++ {
-		ii := i
-		go func() {
-			if err := pool.SyncAdd(func() error {
-				time.Sleep(time.Millisecond * time.Duration(rand.Int31n(1000)))
-				fmt.Printf("[%d]\n", ii)
-				return nil
-			}); err != nil {
-				log.Println("[sync]", ii, err)
-			}
-		}()
-	}
-
-	pool.Close()
-
-	pool.Resize(2)
-
-	for i := 0; i < 10; i++ {
-		ii := i
-		go func() {
-			if err := pool.SyncAdd(func() error {
-				time.Sleep(time.Millisecond * time.Duration(rand.Int31n(1000)))
-				fmt.Printf("[%d]\n", ii)
-				return nil
-			}); err != nil {
-				log.Println("[sync]", ii, err)
-			}
-			if err := pool.Add(func() error {
-				time.Sleep(time.Millisecond * time.Duration(rand.Int31n(1000)))
-				fmt.Println("one")
-				return nil
-			}); err != nil {
-				log.Println("[add]", err)
-			}
-		}()
-	}
-
-	time.Sleep(time.Second * 5)
-
-}
-
-func TestThree(t *testing.T) {
+func TestNewPool(t *testing.T) {
 	var (
-		wg   sync.WaitGroup
-		pool     = NewContextPool(nil, Queue(5000), Worker(10))
-		size int = 0
-		//lock sync.Mutex
+		ctx = context.TODO()
+		p   = gopool.NewPool()
 	)
-	defer pool.Close()
+	defer p.Close()
 
-	wg.Add(5000)
-	for i := 0; i < 5000; i++ {
-		ii := i
-		go func() {
-			defer wg.Done()
-			if ii%200 == 0 {
-				//lock.Lock()
-				//size -= 35
-				//pool.Resize(size)
-				//size += 45
-				//size += 1
-				_ = size
-				pool.Resize(2)
-				//lock.Unlock()
+	p.SyncAdd(ctx, func(ctx2 context.Context) {
+		fmt.Println("hello SyncAdd!")
+	})
+
+	p.Add(ctx, func(ctx context.Context) {
+		fmt.Println("hello Add!")
+	})
+
+	sleep()
+}
+
+func TestNewContextPool(t *testing.T) {
+	var (
+		ctx = context.TODO()
+		p   = gopool.NewContextPool(ctx, gopool.Worker(2), gopool.Queue(2))
+	)
+	defer p.Close()
+
+	p.SyncAdd(ctx, func(ctx2 context.Context) {
+		fmt.Println("hello SyncAdd!")
+	})
+
+	p.Add(ctx, func(ctx context.Context) {
+		fmt.Println("hello Add!")
+	})
+
+	sleep()
+}
+
+func TestPool_Add(t *testing.T) {
+	var (
+		ctx  = context.TODO()
+		p    = gopool.NewContextPool(ctx, gopool.Worker(1), gopool.Queue(1))
+		task = func(ctx context.Context) {
+			fmt.Println("hello Add!")
+		}
+		closeTask = func(ctx context.Context) {
+			fmt.Println("close")
+		}
+	)
+
+	t.Run("add", func(t *testing.T) {
+		if err := p.Add(ctx, task); err != nil {
+			if err == gopool.PoolCloseErr {
+				t.Fatalf("want [nil] real [%s]\n", gopool.PoolCloseErr)
 			}
-			if err := pool.SyncAdd(func() error {
-				time.Sleep(time.Millisecond * time.Duration(rand.Int31n(1000)))
-				fmt.Printf("[%d]\n", ii)
-				return nil
-			}); err != nil {
-				log.Println("[sync]", ii, err)
+		}
+	})
+
+	t.Run("full", func(t *testing.T) {
+		p.Add(ctx, func(ctx context.Context) {
+			sleep()
+			sleep()
+		})
+
+		if err := p.Add(ctx, task); err != nil {
+			if err != gopool.PoolFullErr {
+				t.Fatalf("want [%s] real [%s]\n", gopool.PoolFullErr, err)
 			}
-		}()
+		}
+	})
+
+	t.Run("close", func(t *testing.T) {
+		p.Close()
+		if err := p.Add(ctx, closeTask); err != nil {
+			if err != gopool.PoolCloseErr {
+				t.Fatalf("want [%s] real [%s]\n", gopool.PoolCloseErr, err)
+			}
+		}
+	})
+	sleep()
+}
+
+func TestPool_SyncAdd(t *testing.T) {
+	var (
+		ctx  = context.TODO()
+		p    = gopool.NewContextPool(ctx, gopool.Worker(2), gopool.Queue(2))
+		task = func(ctx context.Context) {
+			fmt.Println("hello SyncAdd!")
+		}
+		closeTask = func(ctx context.Context) {
+			fmt.Println("close")
+		}
+	)
+
+	t.Run("syncAdd", func(t *testing.T) {
+		if err := p.SyncAdd(ctx, task); err != nil {
+			t.Fatalf("want [nil] real [%s]\n", err)
+		}
+	})
+
+	t.Run("close", func(t *testing.T) {
+		p.Close()
+		if err := p.SyncAdd(ctx, closeTask); err != nil {
+			if err != gopool.PoolCloseErr {
+				t.Fatalf("want [%s] real [%s]\n", gopool.PoolCloseErr, err)
+			}
+		}
+	})
+	sleep()
+}
+
+func TestPool_Resize(t *testing.T) {
+	var (
+		ctx = context.TODO()
+		p   = gopool.NewContextPool(ctx, gopool.Worker(2), gopool.Queue(2))
+	)
+
+	tables := []struct {
+		size int
+		want int
+		no   int
+	}{
+		{size: 2, want: 4, no: 0},
+		{size: 2, want: 6, no: 1},
+		{size: -2, want: 4, no: 2},
+		{size: -3, want: 1, no: 3},
+		{size: -1, want: 1, no: 4},
+		{size: -math.MinInt32, want: 1, no: 5},
 	}
-	wg.Wait()
+
+	for _, v := range tables {
+		p.Resize(v.size)
+		sleep()
+		if real := p.Monitor().Worker(); real != v.want {
+			t.Fatalf("no.%d want [%d] real [%d]",v.no, v.want, real, )
+		}
+	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math/rand"
@@ -15,14 +16,18 @@ import (
 )
 
 var (
-	p    *gopool.Pool
+	gp    *gopool.Pool
 	i    int64
 	done = make(chan struct{}, 1)
 )
 
 func do() {
-	p = gopool.NewContextPool(nil, gopool.Queue(1000), gopool.Worker(1))
-	defer p.Close()
+	var (
+		ctx = context.TODO()
+		//gp=gopool.NewPool()//todo：这样声明的对象lock会空指针？？？
+	)
+	gp   = gopool.NewContextPool(ctx, gopool.Queue(1000), gopool.Worker(2))
+	defer gp.Close()
 
 	for {
 		select {
@@ -30,14 +35,13 @@ func do() {
 			log.Println("exit...............")
 			return
 		default:
-		}
-		atomic.AddInt64(&i, 1)
-		if err := p.SyncAdd(func() error {
-			time.Sleep(time.Millisecond * time.Duration(rand.Int31n(1000)))
-			fmt.Printf("[%d]\n", atomic.LoadInt64(&i))
-			return nil
-		}); err != nil {
-			log.Println("[sync]", atomic.LoadInt64(&i), err)
+			atomic.AddInt64(&i, 1)
+			if err := gp.SyncAdd(ctx, func(ctx context.Context) {
+				time.Sleep(time.Millisecond * time.Duration(rand.Int31n(1000)))
+				//fmt.Printf("[%d]\n", atomic.LoadInt64(&i))
+			}); err != nil {
+				log.Println("[sync]", atomic.LoadInt64(&i), err)
+			}
 		}
 	}
 }
@@ -55,17 +59,17 @@ func resize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Fprintln(w, "旧的worker数量:", p.Resize(size))
+	fmt.Fprintln(w, "旧的worker数量:", gp.Resize(size))
 }
 
 func exit(w http.ResponseWriter, r *http.Request) {
 	select {
 	case done <- struct{}{}:
 		go func() {
-			time.Sleep(time.Second*5)
+			time.Sleep(time.Second * 5)
 			runtime.GC()
 			debug.FreeOSMemory()
-			p = nil
+			gp = nil
 		}()
 		fmt.Fprintln(w, "done发送成功")
 	default:
@@ -74,7 +78,9 @@ func exit(w http.ResponseWriter, r *http.Request) {
 }
 
 func monitor(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintln(w, p.Info())
+	fmt.Fprintln(w, gp.Debug())
+	fmt.Fprintln(w, `\n`)
+	fmt.Fprintln(w, gp.Monitor().String())
 }
 
 func create(w http.ResponseWriter, r *http.Request) {

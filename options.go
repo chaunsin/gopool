@@ -33,7 +33,7 @@ func Queue(n int) Option {
 		panic("gopool: Queue should > 0")
 	}
 	return func(o *options) {
-		o.worker = n
+		o.queue = n
 	}
 }
 
